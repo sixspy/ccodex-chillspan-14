@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from models import SpectrumIn
+from seal_state import official_generation
 
 router = APIRouter(tags=["spectrum"])
 
@@ -18,10 +19,19 @@ def list_exports(authorization: AuthHeader = None):
     require_user(authorization)
     with connect() as conn:
         rows = conn.execute(
-            """SELECT s.*, b.batch_code FROM spectrum_exports s
+            """SELECT s.*, b.batch_code, b.generation AS batch_generation_now
+               FROM spectrum_exports s
                JOIN temp_batches b ON b.id=s.batch_id ORDER BY s.id DESC"""
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["official_generation"] = official_generation(
+                conn, r["batch_id"], r["batch_generation_now"]
+            )
+            d.pop("batch_generation_now", None)
+            items.append(d)
+        return {"items": items}
 
 
 @router.post("/api/spectrum/export")
@@ -35,18 +45,19 @@ def export_spectrum(body: SpectrumIn, authorization: AuthHeader = None):
             raise HTTPException(404, "批次不存在")
         if batch["status"] != "已封批":
             raise HTTPException(409, "须先封批再导出温谱")
+        gen = official_generation(conn, batch["id"], batch["generation"])
         points = json.loads(batch["temp_points"] or "[]")
         payload = json.dumps(
             {
                 "batch_code": batch["batch_code"],
-                "generation": batch["generation"],
+                "generation": gen,
                 "points": points,
             },
             ensure_ascii=False,
             sort_keys=True,
         )
         checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-        ref = f"SP-{batch['batch_code']}-G{batch['generation']}"
+        ref = f"SP-{batch['batch_code']}-G{gen}"
         dup = conn.execute(
             "SELECT id FROM spectrum_exports WHERE export_ref=?", (ref,)
         ).fetchone()

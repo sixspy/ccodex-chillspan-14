@@ -9,6 +9,7 @@ from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from locks import release, require_lock
 from models import SealIn
+from seal_state import formal_seal_rows, official_generation
 from validators import require_calibration_fresh, validate_batch_sealable
 
 router = APIRouter(tags=["seal"])
@@ -22,7 +23,14 @@ def list_seals(authorization: AuthHeader = None):
             """SELECT s.*, b.batch_code FROM seal_snapshots s
                JOIN temp_batches b ON b.id=s.batch_id ORDER BY s.id DESC"""
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["official_generation"] = official_generation(
+                conn, r["batch_id"], d["batch_generation"]
+            )
+            items.append(d)
+        return {"items": items}
 
 
 @router.post("/api/seals")
@@ -40,6 +48,26 @@ def seal_batch(body: SealIn, authorization: AuthHeader = None):
             ).fetchone()
             if not batch:
                 raise HTTPException(404, "批次不存在")
+            # 甲路径：同批已有正式封批代则二次封批正式零增并拒写。
+            formal = formal_seal_rows(conn, body.batch_id)
+            if formal:
+                existing_gen = int(formal[0]["batch_generation"])
+                write_audit(
+                    conn,
+                    user,
+                    "二次封偏航",
+                    batch["batch_code"],
+                    {
+                        "batch_id": body.batch_id,
+                        "existing_formal_generation": existing_gen,
+                        "attempted_generation": int(batch["generation"]) + 1,
+                    },
+                )
+                conn.commit()
+                raise HTTPException(
+                    409,
+                    f"同批已存在正式封批代 G{existing_gen}，二次封批拒写",
+                )
             open_exc = conn.execute(
                 """SELECT COUNT(*) c FROM excursion_cursors
                    WHERE batch_id=? AND status='开放'""",

@@ -16,23 +16,28 @@ class LockIn(BaseModel):
 
 
 def try_acquire(conn, lock_key: str, holder: str) -> bool:
+    """原子抢锁：INSERT OR IGNORE 依主键串行化，避免并发双插。
+
+    抢锁成功即落库提交，使其他连接立刻可见；争用痕同步落库，
+    保证后到者即使随后被拒写，痕也不会随业务回滚丢失。
+    """
     now = now_iso()
+    conn.execute(
+        "INSERT OR IGNORE INTO chamber_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
+        (lock_key, holder, now),
+    )
+    conn.commit()
     row = conn.execute(
         "SELECT holder FROM chamber_locks WHERE lock_key=?", (lock_key,)
     ).fetchone()
-    if row is None:
-        conn.execute(
-            "INSERT INTO chamber_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
-            (lock_key, holder, now),
-        )
-        return True
-    if row["holder"] == holder:
+    if row is not None and row["holder"] == holder:
         return True
     conn.execute(
         """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
            VALUES (?,?,?,?,?)""",
-        (lock_key, holder, "争用", f"持有者={row['holder']}", now),
+        (lock_key, holder, "争用", f"持有者={row['holder'] if row else '未知'}", now),
     )
+    conn.commit()
     return False
 
 
@@ -41,6 +46,8 @@ def release(conn, lock_key: str, holder: str) -> None:
         "DELETE FROM chamber_locks WHERE lock_key=? AND holder=?",
         (lock_key, holder),
     )
+    # 显式提交：拒写异常路径下连接上下文会回滚，需确保解锁不被撤回。
+    conn.commit()
 
 
 def require_lock(conn, lock_key: str, holder: str) -> None:

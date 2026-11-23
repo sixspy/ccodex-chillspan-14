@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user
 from db import connect
+from seal_state import official_generation
 
 router = APIRouter(tags=["reconcile"])
 
@@ -85,17 +86,19 @@ def batch_proof(batch_code: str, authorization: AuthHeader = None):
                WHERE batch_id=? AND status='开放'""",
             (batch["id"],),
         ).fetchone()["c"]
+        sealed = batch["status"] == "已封批"
+        official_gen = official_generation(conn, batch["id"], batch["generation"])
         exports = conn.execute(
             """SELECT COUNT(*) c FROM spectrum_exports
                WHERE batch_id=? AND status='已导出'""",
             (batch["id"],),
         ).fetchone()["c"]
-        sealed = batch["status"] == "已封批"
         spectrum_ok = (exports >= 1) if sealed else True
         return {
             "batch_code": batch_code,
             "status": batch["status"],
             "generation": batch["generation"],
+            "official_generation": official_gen,
             "open_excursions": open_exc,
             "spectrum_exports": exports,
             "sealed": sealed,

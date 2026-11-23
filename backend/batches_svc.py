@@ -9,6 +9,7 @@ from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from locks import release, require_lock
 from models import BatchIn
+from seal_state import official_generation
 from validators import summarize_points, validate_probe_online, validate_temp_point
 
 router = APIRouter(tags=["batches"])
@@ -49,6 +50,9 @@ def list_batches(authorization: AuthHeader = None, status: str | None = None):
         for r in rows:
             d = dict(r)
             d["temp_points"] = json.loads(d["temp_points"] or "[]")
+            d["official_generation"] = official_generation(
+                conn, d["id"], d["generation"]
+            )
             items.append(d)
         return {"items": items}
 
@@ -68,6 +72,9 @@ def get_batch(batch_id: int, authorization: AuthHeader = None):
             raise HTTPException(404, "批次不存在")
         data = dict(row)
         data["temp_points"] = json.loads(data["temp_points"] or "[]")
+        data["official_generation"] = official_generation(
+            conn, batch_id, data["generation"]
+        )
         exc = conn.execute(
             "SELECT * FROM excursion_cursors WHERE batch_id=? ORDER BY id DESC",
             (batch_id,),

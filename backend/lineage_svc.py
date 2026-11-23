@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from models import LineageIn
+from seal_state import official_generation
 
 router = APIRouter(tags=["lineage"])
 
@@ -21,7 +22,16 @@ def list_edges(authorization: AuthHeader = None):
                LEFT JOIN temp_batches b ON b.id=e.to_batch_id
                ORDER BY e.id DESC"""
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["from_generation"] = official_generation(conn, r["from_batch_id"])
+            if r["to_batch_id"] is not None:
+                d["to_generation"] = official_generation(conn, r["to_batch_id"])
+            else:
+                d["to_generation"] = None
+            items.append(d)
+        return {"items": items}
 
 
 @router.post("/api/lineage")
